@@ -113,14 +113,13 @@ def generate_env(
     with open(env_path, "w") as f:
         f.write("\n".join(lines))
 
-    # .gitignore — .env y data/ nunca van al repo
+    # .gitignore
     gitignore = output_dir / ".gitignore"
     existing = gitignore.read_text() if gitignore.exists() else ""
     additions = []
-    if ".env" not in existing:
-        additions.append(".env")
-    if "data/" not in existing:
-        additions.append("data/")
+    for entry in [".env", "data/", ".venv/", "__pycache__/"]:
+        if entry not in existing:
+            additions.append(entry)
     if additions:
         with open(gitignore, "a") as f:
             f.write("\n" + "\n".join(additions) + "\n")

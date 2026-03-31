@@ -1,13 +1,13 @@
 SERVICE = {
     "id": "nginx",
-    "name": "Nginx reverse proxy",
-    "description": "Reverse proxy — exposes services under a domain",
+    "name": "Nginx",
+    "description": "Reverse proxy",
     "questions": [
         {"key": "BASE_DOMAIN", "label": "Base domain (e.g. myserver.com or IP)", "default": "localhost"},
     ],
     "compose": {
         "nginx": {
-            "image": "nginx:alpine",
+            "image": "nginx:bookworm",
             "restart": "unless-stopped",
             "ports": ["80:80", "443:443"],
             "volumes": [
@@ -22,6 +22,6 @@ SERVICE = {
     "volumes": ["./data/nginx-logs", "./nginx/conf.d", "./nginx/ssl"],
     "post_install_note": (
         "ℹ  Vhosts generated at ./nginx/conf.d/\n"
-        "   For SSL: copy your certificates to ./nginx/ssl/ or use Certbot"
+        "   For SSL: copy certificates to ./nginx/ssl/ or use Certbot."
     ),
 }

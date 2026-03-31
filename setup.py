@@ -10,6 +10,51 @@ import importlib
 import subprocess
 from pathlib import Path
 
+def _bootstrap_deps():
+    """Install dependencies, handling Debian externally-managed environments."""
+    here = Path(__file__).parent
+    venv = here / ".venv"
+
+    # Already inside a venv — just install
+    if sys.prefix != sys.base_prefix:
+        subprocess.check_call([sys.executable, "-m", "pip", "install",
+                               "-r", str(here / "requirements.txt"), "-q"])
+        return
+
+    # Try plain pip first (works on most systems)
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install",
+         "-r", str(here / "requirements.txt"), "-q"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        return
+
+    # Debian 12+ externally-managed — create .venv and re-exec inside it
+    if "externally-managed-environment" in result.stderr:
+        print("Detected externally-managed Python. Creating .venv ...")
+
+        venv_result = subprocess.run(
+            [sys.executable, "-m", "venv", str(venv)],
+            capture_output=True, text=True,
+        )
+        if venv_result.returncode != 0 and "ensurepip" in venv_result.stderr:
+            print("python3-venv not found — installing via apt (needs sudo)...")
+            subprocess.check_call(["sudo", "apt-get", "install", "-y", "python3-venv"])
+            subprocess.check_call([sys.executable, "-m", "venv", str(venv)])
+        elif venv_result.returncode != 0:
+            print(venv_result.stderr)
+            sys.exit(1)
+
+        subprocess.check_call([str(venv / "bin" / "pip"), "install",
+                               "-r", str(here / "requirements.txt"), "-q"])
+        os.execv(str(venv / "bin" / "python3"),
+                 [str(venv / "bin" / "python3")] + sys.argv)
+    else:
+        print(result.stderr)
+        sys.exit(1)
+
+
 try:
     import questionary, yaml
     from rich.console import Console
@@ -18,8 +63,7 @@ try:
     from rich         import box
 except ImportError:
     print("Installing dependencies...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           "-r", "requirements.txt", "-q"])
+    _bootstrap_deps()
     import questionary, yaml
     from rich.console import Console
     from rich.panel   import Panel
@@ -36,7 +80,15 @@ from services.custom   import ask_custom_template, load_custom_templates
 
 console = Console()
 
-BUILTIN_SERVICES = ["gitea", "postgres", "wikijs", "dbsync", "nginx"]
+BUILTIN_SERVICES = [
+    "postgres",
+    "gitea",
+    "gitea_runner",
+    "api_node",
+    "api_rust",
+    "wikijs",
+    "nginx",
+]
 BASE_DIR = Path(__file__).parent
 TMPL_DIR = BASE_DIR / "services" / "templates"
 
@@ -151,7 +203,7 @@ def step_services(output_dir: Path) -> list[dict]:
         label = f"{svc['name']}  [dim]— {svc['description']}[/dim]"
         pre   = svc["id"] in existing if action == "modify" else False
         choices.append(questionary.Choice(label, value=svc["id"], checked=pre))
-    choices.append(questionary.Choice("[+] Add custom service...", value="__custom__"))
+    choices.append(questionary.Choice("[+] Create new service template...", value="__custom__"))
 
     selected_ids = questionary.checkbox("Select the services to include:", choices=choices).ask()
     if selected_ids is None:
@@ -269,39 +321,68 @@ def step_clone_repos(selected_services: list[dict], answers: dict, output_dir: P
     if not needs_clone:
         return
 
-    section("3b · Cloning service repos")
+    section("3b · Service repos")
 
-    # Ask for Gitea base URL if not already in answers
-    gitea_base = answers.get("GITEA_BASE", "").strip()
+    # Detect if this looks like a first-time run (Gitea itself is in the stack)
+    gitea_in_stack = any(s["id"] == "gitea" for s in selected_services)
+    gitea_base     = answers.get("GITEA_BASE", "").strip()
+
+    if gitea_in_stack and not gitea_base:
+        console.print(
+            "[cyan]ℹ  Gitea is part of this stack, so it may not be running yet.[/cyan]\n"
+            "   You can skip cloning now — the compose files will be generated anyway.\n"
+            "   Once Gitea is up and you've pushed the repos, run setup.py again\n"
+            "   and it will clone them automatically.\n"
+        )
+        skip = questionary.select(
+            "What do you want to do?",
+            choices=[
+                questionary.Choice("Skip cloning for now — generate files only", value="skip"),
+                questionary.Choice("Gitea is already running — clone now",        value="clone"),
+            ],
+        ).ask()
+        if skip is None or skip == "skip":
+            answers["GITEA_BASE"] = ""
+            console.print("[dim]Skipped. Run setup.py again after Gitea is up to clone repos.[/dim]\n")
+            return
+
+    # Ask for Gitea base URL if not already known
     if not gitea_base:
+        default_url = (
+            f"http://{answers.get('GITEA_DOMAIN', 'git')}.{answers.get('BASE_DOMAIN', 'localhost')}"
+        )
         gitea_base = questionary.text(
-            "Gitea server base URL (e.g. https://git.myserver.com):",
-            default=answers.get("GITEA_DOMAIN")
-                and f"http://{answers.get('GITEA_DOMAIN')}.{answers.get('BASE_DOMAIN', 'localhost')}"
-                or "http://localhost:3000",
+            "Gitea server base URL (e.g. http://git.myserver.com):",
+            default=default_url,
         ).ask()
         if gitea_base is None:
             sys.exit(0)
         answers["GITEA_BASE"] = gitea_base.rstrip("/")
 
-    console.print(f"[dim]Cloning from {gitea_base} into {output_dir}/services/[/dim]\n")
+    console.print(f"[dim]Cloning from {answers['GITEA_BASE']} → {output_dir}/services/[/dim]\n")
 
     results = clone_service_repos(selected_services, answers["GITEA_BASE"], output_dir)
+    failed  = []
 
     for r in results:
         if r["status"] == "cloned":
-            console.print(f"[green]✔[/green]  {r['service']}  [dim]cloned[/dim]")
+            console.print(f"[green]✔[/green]  {r['service']}  cloned")
         elif r["status"] == "pulled":
-            console.print(f"[green]✔[/green]  {r['service']}  [dim]already exists — pulled latest[/dim]")
+            console.print(f"[green]✔[/green]  {r['service']}  up to date (pulled)")
         elif r["status"] == "skipped":
-            console.print(f"[yellow]⚠[/yellow]  {r['service']}  [dim]{r['detail']}[/dim]")
+            console.print(f"[yellow]⚠[/yellow]  {r['service']}  {r['detail']}")
         else:
             console.print(f"[red]✗[/red]  {r['service']}  [red]{r['detail']}[/red]")
-            ok = questionary.confirm(
-                f"  Clone failed for {r['service']}. Continue anyway?", default=False
-            ).ask()
-            if not ok:
-                sys.exit(1)
+            failed.append(r["service"])
+
+    if failed:
+        console.print()
+        console.print(
+            f"[yellow]⚠  {len(failed)} repo(s) could not be cloned: {', '.join(failed)}[/yellow]\n"
+            "   The compose files will still be generated.\n"
+            "   Push the repos to Gitea and run setup.py again to finish.\n"
+        )
+        # Don't ask — just continue. The stack is usable without them (can't build yet, but that's fine).
 
     console.print()
 
@@ -335,14 +416,26 @@ def step_generate(selected_services: list[dict], answers: dict, output_dir: Path
 
 # ─────────────────────────── step 5: summary ────────────────────
 
-def step_summary(selected_services: list[dict], override_paths: list[Path], output_dir: Path):
+def step_summary(selected_services: list[dict], override_paths: list[Path], output_dir: Path, answers: dict):
     section("5 · Done")
 
     console.print(f"[bold]Stack generated at:[/bold] {output_dir}\n")
 
-    console.print("To start the stack:")
-    console.print(f"  [bold cyan]cd {output_dir}[/bold cyan]")
-    console.print(f"  [bold cyan]docker compose up -d[/bold cyan]\n")
+    # First-time bootstrap order if Gitea is in the stack
+    gitea_in_stack   = any(s["id"] == "gitea" for s in selected_services)
+    repos_pending    = bool(services_needing_clone(selected_services)) and not answers.get("GITEA_BASE")
+
+    if gitea_in_stack and repos_pending:
+        console.print("[bold]Bootstrap order (first-time setup):[/bold]")
+        console.print(f"  1.  [bold cyan]cd {output_dir}[/bold cyan]")
+        console.print( "  2.  [bold cyan]docker compose up -d[/bold cyan]  — starts Gitea, nginx, postgres")
+        console.print( "  3.  Open Gitea and finish the install wizard")
+        console.print( "  4.  Push your service repos (dbsync-engine, etc.) to Gitea")
+        console.print( "  5.  [bold cyan]python3 setup.py[/bold cyan]  — run again to clone the repos and rebuild\n")
+    else:
+        console.print("To start the stack:")
+        console.print(f"  [bold cyan]cd {output_dir}[/bold cyan]")
+        console.print(f"  [bold cyan]docker compose up -d[/bold cyan]\n")
 
     console.print("[bold]To add or remove a service later:[/bold]")
     console.print("  Edit [cyan]COMPOSE_FILE[/cyan] in [cyan].env[/cyan] — add or remove a filename from the list")
@@ -388,7 +481,7 @@ def main():
 
     step_clone_repos(selected_services, answers, output_dir)
     override_paths = step_generate(selected_services, answers, output_dir)
-    step_summary(selected_services, override_paths, output_dir)
+    step_summary(selected_services, override_paths, output_dir, answers)
 
 
 if __name__ == "__main__":

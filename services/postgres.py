@@ -1,16 +1,16 @@
 SERVICE = {
     "id": "postgres",
-    "name": "PostgreSQL (standalone)",
-    "description": "Standalone PostgreSQL database",
+    "name": "PostgreSQL",
+    "description": "PostgreSQL database server",
     "questions": [
-        {"key": "POSTGRES_PORT", "label": "External port",     "default": "5432"},
-        {"key": "POSTGRES_USER", "label": "Username",          "default": "postgres"},
-        {"key": "POSTGRES_PASS", "label": "Password",          "default": "changeme"},
-        {"key": "POSTGRES_DB",   "label": "Database name",     "default": "appdb"},
+        {"key": "POSTGRES_PORT", "label": "External port",    "default": "5432"},
+        {"key": "POSTGRES_USER", "label": "Username",         "default": "postgres"},
+        {"key": "POSTGRES_PASS", "label": "Password",         "default": "changeme"},
+        {"key": "POSTGRES_DB",   "label": "Database name",    "default": "appdb"},
     ],
     "compose": {
         "postgres": {
-            "image": "postgres:16-alpine",
+            "image": "postgres:16-bookworm",
             "restart": "unless-stopped",
             "environment": [
                 "POSTGRES_USER=${POSTGRES_USER}",
@@ -19,6 +19,12 @@ SERVICE = {
             ],
             "volumes": ["./data/postgres:/var/lib/postgresql/data"],
             "ports": ["${POSTGRES_PORT}:5432"],
+            "healthcheck": {
+                "test": ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"],
+                "interval": "10s",
+                "timeout": "5s",
+                "retries": 5,
+            },
         }
     },
     "nginx_upstream":   None,

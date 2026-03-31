@@ -1,12 +1,11 @@
 SERVICE = {
     "id": "wikijs",
-    "name": "Wiki.js + Gitea sync",
+    "name": "Wiki.js",
     "description": "Wiki with Git repository sync",
     "questions": [
-        {"key": "WIKI_PORT",      "label": "Wiki.js external port",       "default": "3001"},
-        {"key": "WIKI_DOMAIN",    "label": "Subdomain (e.g. wiki)",       "default": "wiki"},
-        {"key": "WIKI_DB_PASS",   "label": "Internal database password",  "default": "wiki_secret"},
-        {"key": "WIKI_GITEA_REPO","label": "Gitea repo URL for sync (leave blank to configure later)", "default": ""},
+        {"key": "WIKI_PORT",    "label": "External port",         "default": "3001"},
+        {"key": "WIKI_DOMAIN",  "label": "Subdomain (e.g. wiki)", "default": "wiki"},
+        {"key": "WIKI_DB_PASS", "label": "Internal DB password",  "default": "wiki_secret"},
     ],
     "compose": {
         "wikijs": {
@@ -25,7 +24,7 @@ SERVICE = {
             "depends_on": ["wikijs-db"],
         },
         "wikijs-db": {
-            "image": "postgres:16-alpine",
+            "image": "postgres:16-bookworm",
             "restart": "unless-stopped",
             "environment": [
                 "POSTGRES_USER=wiki",
@@ -39,7 +38,7 @@ SERVICE = {
     "nginx_domain_var": "WIKI_DOMAIN",
     "volumes": ["./data/wikijs", "./data/wikijs-db"],
     "post_install_note": (
-        "ℹ  Wiki.js + Gitea sync: configure it from the Wiki.js admin panel at\n"
-        "   Storage → Git Repository, using the URL in WIKI_GITEA_REPO"
+        "ℹ  Wiki.js + Gitea sync: configure it from the Wiki.js admin panel\n"
+        "   at Storage → Git Repository."
     ),
 }

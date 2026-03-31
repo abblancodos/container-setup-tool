@@ -4,19 +4,12 @@ from pathlib import Path
 
 
 def ask_custom_template(templates_dir: Path) -> dict | None:
-    """Guide the user through creating a custom service template."""
+    """Create a brand new service template from scratch."""
+    return _create_template(templates_dir)
 
-    choice = questionary.select(
-        "Use an existing template or create a new one?",
-        choices=[
-            questionary.Choice("Create new template", value="new"),
-            questionary.Choice("Cancel", value="cancel"),
-        ],
-    ).ask()
 
-    if choice == "cancel" or choice is None:
-        return None
-
+def _create_template(templates_dir: Path) -> dict | None:
+    """Walk the user through creating a new service template."""
     print()
     print("  A few questions to build the template.")
     print("  Leave fields blank if they don't apply.\n")
@@ -25,54 +18,55 @@ def ask_custom_template(templates_dir: Path) -> dict | None:
         "Service ID (no spaces, e.g. myapp):",
         validate=lambda v: True if v.strip() else "Cannot be empty",
     ).ask()
+    if svc_id is None:
+        return None
 
     svc_name = questionary.text("Display name:").ask()
     svc_desc = questionary.text("Short description:").ask()
     image    = questionary.text(
-        "Docker image (e.g. nginx:alpine, myuser/myapp:latest):",
+        "Docker image (e.g. nginx:bookworm, myuser/myapp:latest):",
         validate=lambda v: True if v.strip() else "Required",
     ).ask()
+    if image is None:
+        return None
 
     ext_port = questionary.text(
         "Container port to expose (e.g. 3000), leave blank if none:",
     ).ask()
 
     needs_nginx = False
-    subdomain   = ""
     if ext_port:
         needs_nginx = questionary.confirm(
             "Should nginx proxy to this service?", default=True
         ).ask()
-        if needs_nginx:
-            subdomain = questionary.text(
-                "Default subdomain (e.g. myapp):", default=svc_id
-            ).ask()
 
-    volumes_raw   = questionary.text(
+    volumes_raw  = questionary.text(
         "Volumes to mount (comma-separated, e.g. ./data/myapp:/data):\n  blank = none:",
     ).ask()
-    env_vars_raw  = questionary.text(
-        "Container environment variables (comma-separated, e.g. ENV=val,OTHER=x):\n  blank = none:",
+    env_vars_raw = questionary.text(
+        "Container environment variables (comma-separated, e.g. ENV=val):\n  blank = none:",
     ).ask()
-    extra_q_raw   = questionary.text(
+    extra_q_raw  = questionary.text(
         "User-configurable variables (comma-separated keys, e.g. MY_SECRET,MY_PORT):\n  blank = none:",
     ).ask()
-    depends_raw   = questionary.text(
-        "Depends on another service in this stack? (e.g. postgres, blank = no):",
+    depends_raw  = questionary.text(
+        "Depends on another service? (e.g. postgres, blank = no):",
     ).ask()
     template_note = questionary.text(
-        "Post-install note (special instructions, blank = none):",
+        "Post-install note (blank = none):",
     ).ask()
 
-    volumes_list  = [v.strip() for v in volumes_raw.split(",")  if v.strip()] if volumes_raw  else []
-    env_vars_list = [e.strip() for e in env_vars_raw.split(",") if e.strip()] if env_vars_raw else []
-    depends_list  = [d.strip() for d in depends_raw.split(",")  if d.strip()] if depends_raw  else []
-    extra_keys    = [k.strip() for k in extra_q_raw.split(",")  if k.strip()] if extra_q_raw  else []
+    def split(s): return [x.strip() for x in s.split(",") if x.strip()] if s else []
+
+    volumes_list  = split(volumes_raw)
+    env_vars_list = split(env_vars_raw)
+    depends_list  = split(depends_raw)
+    extra_keys    = split(extra_q_raw)
 
     questions = []
     for key in extra_keys:
-        default_val = questionary.text(f"  Default value for {key}:").ask()
-        label       = questionary.text(f"  Description for {key}:").ask()
+        default_val = questionary.text(f"  Default value for {key}:").ask() or ""
+        label       = questionary.text(f"  Description for {key}:").ask() or key
         questions.append({"key": key, "label": label, "default": default_val})
 
     compose_def: dict = {"image": image, "restart": "unless-stopped"}
@@ -88,18 +82,27 @@ def ask_custom_template(templates_dir: Path) -> dict | None:
     if depends_list:
         compose_def["depends_on"] = depends_list
 
+    nginx_domain_var = None
+    if needs_nginx and ext_port:
+        domain_key = f"{svc_id.upper().replace('-', '_')}_DOMAIN"
+        nginx_domain_var = domain_key
+        subdomain = questionary.text(
+            f"Default subdomain for nginx:", default=svc_id
+        ).ask() or svc_id
+        questions.append({"key": domain_key, "label": "Subdomain", "default": subdomain})
+
     data_volumes = [f"./data/{svc_id}"] if any("./data" in v for v in volumes_list) else []
 
     SERVICE = {
         "id":               svc_id,
-        "name":             svc_name,
-        "description":      svc_desc,
+        "name":             svc_name or svc_id,
+        "description":      svc_desc or "",
         "questions":        questions,
         "compose":          {svc_id: compose_def},
         "nginx_upstream":   f"{svc_id}:{ext_port}" if needs_nginx and ext_port else None,
-        "nginx_domain_var": f"{svc_id.upper().replace('-', '_')}_DOMAIN" if needs_nginx else None,
+        "nginx_domain_var": nginx_domain_var,
         "volumes":          data_volumes,
-        "post_install_note": template_note if template_note else None,
+        "post_install_note": template_note or None,
     }
 
     templates_dir.mkdir(parents=True, exist_ok=True)
@@ -107,7 +110,7 @@ def ask_custom_template(templates_dir: Path) -> dict | None:
     with open(out_path, "w") as f:
         yaml.dump(SERVICE, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
-    print(f"\n  ✔  Template saved to {out_path}")
+    print(f"\n  Saved to {out_path}")
     print(f"  To keep it: git add services/templates && git commit -m 'add {svc_id} template'\n")
 
     return SERVICE

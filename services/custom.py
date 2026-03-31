@@ -3,9 +3,100 @@ import yaml
 from pathlib import Path
 
 
-def ask_custom_template(templates_dir: Path) -> dict | None:
-    """Create a brand new service template from scratch."""
+def ask_custom_template(templates_dir: Path, builtins: list[dict] | None = None) -> dict | None:
+    """Pick a builtin as base, use a saved template, or create from scratch."""
+    saved = load_custom_templates(templates_dir)
+
+    choices = []
+
+    # Builtins that make sense to add more than once (APIs)
+    repeatable = ["api-node", "api-rust"]
+    for svc in (builtins or []):
+        if svc["id"] in repeatable:
+            label = f"{svc['name']}  [dim]— use as starting point[/dim]"
+            choices.append(questionary.Choice(svc["name"] + "  — use as starting point",
+                                              value=("builtin", svc)))
+
+    for svc in saved:
+        choices.append(questionary.Choice(svc["name"] + "  — saved template",
+                                          value=("saved", svc)))
+
+    choices.append(questionary.Choice("[+] Create new from scratch", value=("new", None)))
+    choices.append(questionary.Choice("Cancel",                      value=("cancel", None)))
+
+    result = questionary.select(
+        "Add another service:",
+        choices=choices,
+    ).ask()
+
+    if result is None:
+        return None
+
+    action, svc = result
+
+    if action == "cancel":
+        return None
+    if action in ("builtin", "saved"):
+        # Clone the service with new name/port to avoid ID conflicts
+        return _customize_clone(svc)
     return _create_template(templates_dir)
+
+
+def _customize_clone(base: dict) -> dict | None:
+    """Ask for a new name/subdomain to clone an existing service."""
+    import copy
+    svc = copy.deepcopy(base)
+
+    new_name = questionary.text(
+        f"Service name for this instance (must be unique):",
+        default=f"{base['id']}-2",
+    ).ask()
+    if not new_name:
+        return None
+    new_name = new_name.strip()
+
+    new_subdomain = questionary.text(
+        "Subdomain for nginx:",
+        default=new_name,
+    ).ask()
+    if not new_subdomain:
+        return None
+
+    # Remap keys to avoid collision with the original
+    prefix = new_name.upper().replace("-", "_")
+    svc["id"] = new_name
+
+    # Remap questions keys
+    new_questions = []
+    key_map = {}
+    for q in svc.get("questions", []):
+        new_key = f"{prefix}_{q['key'].split('_', 2)[-1]}" if "_" in q["key"] else f"{prefix}_{q['key']}"
+        key_map[q["key"]] = new_key
+        new_q = dict(q)
+        new_q["key"] = new_key
+        new_questions.append(new_q)
+
+    # Update domain question default
+    for q in new_questions:
+        if "DOMAIN" in q["key"]:
+            q["default"] = new_subdomain
+
+    svc["questions"] = new_questions
+
+    # Update nginx_domain_var
+    if svc.get("nginx_domain_var"):
+        old_domain_var = svc["nginx_domain_var"]
+        svc["nginx_domain_var"] = key_map.get(old_domain_var, f"{prefix}_DOMAIN")
+
+    # Update nginx_upstream with new service name
+    if svc.get("nginx_upstream"):
+        svc["nginx_upstream"] = f"{new_name}:3000"
+
+    # Update compose key
+    old_compose = svc.get("compose", {})
+    svc["compose"] = {new_name: list(old_compose.values())[0]}
+
+    return svc
 
 
 def _create_template(templates_dir: Path) -> dict | None:

@@ -165,7 +165,69 @@ def step_directory() -> Path:
     return output_dir
 
 
-# ─────────────────────────── step 2: services ───────────────────
+# ─────────────────────────── template picker ────────────────────
+
+def pick_or_create_service(all_svcs: list[dict], templates_dir: Path) -> dict | None:
+    """
+    Select menu shown when user picks [+] Add another service.
+    Lists all builtin + saved templates, then offers Create new at the bottom.
+    Selected template is cloned with a fresh unique ID so multiple instances work.
+    """
+    choices = []
+    for svc in all_svcs:
+        label = f"{svc['name']}  [dim]— {svc['description']}[/dim]"
+        choices.append(questionary.Choice(label, value=svc))
+    choices.append(questionary.Separator())
+    choices.append(questionary.Choice("[+] Create new template...", value="__new__"))
+    choices.append(questionary.Choice("Cancel", value=None))
+
+    picked = questionary.select(
+        "Which service do you want to add?",
+        choices=choices,
+    ).ask()
+
+    if picked is None:
+        return None
+
+    if picked == "__new__":
+        from services.custom import ask_custom_template
+        return ask_custom_template(templates_dir)
+
+    # Clone the template so it gets a unique ID (allows multiple instances)
+    import copy
+    svc = copy.deepcopy(picked)
+    new_id = questionary.text(
+        f"Instance name for this {svc['name']} (used as service ID, no spaces):",
+        default=svc["id"],
+        validate=lambda v: True if v.strip() else "Cannot be empty",
+    ).ask()
+    if new_id is None:
+        return None
+
+    new_id = new_id.strip()
+    if new_id == svc["id"]:
+        return svc  # same id, no renaming needed
+
+    # Rename all keys and compose service names that reference the old id
+    old_id  = svc["id"]
+    old_key = old_id.upper().replace("-", "_")
+    new_key = new_id.upper().replace("-", "_")
+
+    def rename(v):
+        if isinstance(v, str):
+            return v.replace(old_id, new_id).replace(old_key, new_key)
+        if isinstance(v, list):
+            return [rename(i) for i in v]
+        if isinstance(v, dict):
+            return {rename(k): rename(val) for k, val in v.items()}
+        return v
+
+    svc = rename(svc)
+    svc["id"] = new_id
+    return svc
+
+
+# ─────────────────────────── step 2: services ───────────────────────
 
 def step_services(output_dir: Path) -> list[dict]:
     section("2 · Services")
@@ -203,7 +265,7 @@ def step_services(output_dir: Path) -> list[dict]:
         label = f"{svc['name']}  [dim]— {svc['description']}[/dim]"
         pre   = svc["id"] in existing if action == "modify" else False
         choices.append(questionary.Choice(label, value=svc["id"], checked=pre))
-    choices.append(questionary.Choice("[+] Create new service template...", value="__custom__"))
+    choices.append(questionary.Choice("[+] Add another service...", value="__custom__"))
 
     selected_ids = questionary.checkbox("Select the services to include:", choices=choices).ask()
     if selected_ids is None:
@@ -212,7 +274,7 @@ def step_services(output_dir: Path) -> list[dict]:
     selected_services = []
     for sid in selected_ids:
         if sid == "__custom__":
-            new_svc = ask_custom_template(TMPL_DIR)
+            new_svc = pick_or_create_service(all_svcs, TMPL_DIR)
             if new_svc:
                 selected_services.append(new_svc)
         else:

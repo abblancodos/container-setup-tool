@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-infra-setup — Docker stack configurator
+Lab. Embebidos — Docker Server Setup Tool
 Usage: python3 setup.py
 """
 
@@ -101,13 +101,18 @@ def load_builtin(name: str) -> dict:
 
 
 def detect_existing(output_dir: Path) -> list[str]:
-    """Detect already configured services by reading docker-compose.yml."""
-    compose_file = output_dir / "docker-compose.yml"
-    if not compose_file.exists():
+    """Detect configured services by reading all docker-compose*.yml files."""
+    compose_files = sorted(output_dir.glob("docker-compose*.yml"))
+    if not compose_files:
         return []
-    with open(compose_file) as f:
-        data = yaml.safe_load(f) or {}
-    return list((data.get("services") or {}).keys())
+    services = []
+    for cf in compose_files:
+        with open(cf) as f:
+            data = yaml.safe_load(f) or {}
+        for svc in (data.get("services") or {}):
+            if svc not in services:
+                services.append(svc)
+    return services
 
 
 def needs_sudo(path: Path) -> bool:
@@ -125,8 +130,7 @@ def open_in_editor(path: Path):
 
 def header():
     console.print(Panel.fit(
-        "[bold cyan]infra-setup[/bold cyan]  •  Docker stack configurator\n"
-        "[dim]Generate your docker-compose stack without digging through menus[/dim]",
+        "[bold cyan]Lab. Embebidos — Docker Server Setup Tool[/bold cyan]",
         border_style="cyan",
     ))
     console.print()
@@ -175,15 +179,16 @@ def pick_or_create_service(all_svcs: list[dict], templates_dir: Path) -> dict | 
     """
     choices = []
     for svc in all_svcs:
-        label = f"{svc['name']}  [dim]— {svc['description']}[/dim]"
+        label = f"{svc['name']}  — {svc['description']}"
         choices.append(questionary.Choice(label, value=svc))
-    choices.append(questionary.Separator())
+    choices.append(questionary.Separator("─────────────────────"))
     choices.append(questionary.Choice("[+] Create new template...", value="__new__"))
     choices.append(questionary.Choice("Cancel", value=None))
 
     picked = questionary.select(
         "Which service do you want to add?",
         choices=choices,
+        use_shortcuts=False,
     ).ask()
 
     if picked is None:

@@ -3,7 +3,6 @@ SERVICE = {
     "name": "Wiki.js",
     "description": "Wiki with Git repository sync",
     "questions": [
-        {"key": "WIKI_PORT",    "label": "External port",         "default": "3001"},
         {"key": "WIKI_DOMAIN",  "label": "Subdomain (e.g. wiki)", "default": "wiki"},
         {"key": "WIKI_DB_PASS", "label": "Internal DB password",  "default": "wiki_secret"},
     ],
@@ -20,8 +19,8 @@ SERVICE = {
                 "DB_PASS=${WIKI_DB_PASS}",
             ],
             "volumes": ["./data/wikijs:/wiki/data"],
-            "ports": ["${WIKI_PORT}:3000"],
             "depends_on": ["wikijs-db"],
+            # No external port — accessed via nginx only
         },
         "wikijs-db": {
             "image": "postgres:16-bookworm",
@@ -38,7 +37,6 @@ SERVICE = {
     "nginx_domain_var": "WIKI_DOMAIN",
     "volumes": ["./data/wikijs", "./data/wikijs-db"],
     "post_install_note": (
-        "ℹ  Wiki.js + Gitea sync: configure it from the Wiki.js admin panel\n"
-        "   at Storage → Git Repository."
+        "ℹ  Wiki.js + Gitea sync: configure at Storage → Git Repository."
     ),
 }

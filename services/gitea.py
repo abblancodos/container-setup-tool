@@ -3,8 +3,7 @@ SERVICE = {
     "name": "Gitea",
     "description": "Self-hosted Git server",
     "questions": [
-        {"key": "GITEA_PORT",    "label": "External port",               "default": "3000"},
-        {"key": "GITEA_DOMAIN",  "label": "Subdomain (e.g. git)",        "default": "git"},
+        {"key": "GITEA_DOMAIN",  "label": "Subdomain (e.g. git)",       "default": "git"},
         {"key": "GITEA_DB_PASS", "label": "Internal DB password",        "default": "gitea_secret"},
     ],
     "compose": {
@@ -19,8 +18,8 @@ SERVICE = {
                 "GITEA__database__PASSWD=${GITEA_DB_PASS}",
             ],
             "volumes": ["./data/gitea:/var/lib/gitea"],
-            "ports": ["${GITEA_PORT}:3000"],
             "depends_on": ["gitea-db"],
+            # No external port — accessed via nginx only
         },
         "gitea-db": {
             "image": "postgres:16-bookworm",
@@ -37,6 +36,7 @@ SERVICE = {
     "nginx_domain_var": "GITEA_DOMAIN",
     "volumes": ["./data/gitea", "./data/gitea-db"],
     "post_install_note": (
-        "ℹ  Open Gitea in your browser to complete the install wizard."
+        "ℹ  Open Gitea via nginx to complete the install wizard.\n"
+        "   Point your Caddy/Cloudflare domain to this server."
     ),
 }

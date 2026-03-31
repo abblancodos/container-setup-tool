@@ -7,10 +7,10 @@ SERVICE = {
         {"key": "API_RUST_DOMAIN", "label": "Subdomain (e.g. sensor)",        "default": "sensor"},
     ],
     "compose": {
-        "${API_RUST_NAME}": {
+        "api-rust": {
             "image": "${API_RUST_NAME}:latest",
             "restart": "unless-stopped",
-            # No external port — accessed via nginx only
+            "container_name": "${API_RUST_NAME}",
             "healthcheck": {
                 "test": ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"],
                 "interval": "15s",
@@ -19,7 +19,7 @@ SERVICE = {
             },
         }
     },
-    "nginx_upstream":   "${API_RUST_NAME}:3000",
+    "nginx_upstream":   "api-rust:3000",
     "nginx_domain_var": "API_RUST_DOMAIN",
     "volumes": [],
     "post_install_note": (

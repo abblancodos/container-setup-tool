@@ -7,10 +7,10 @@ SERVICE = {
         {"key": "API_NODE_DOMAIN", "label": "Subdomain (e.g. api)",       "default": "api"},
     ],
     "compose": {
-        "${API_NODE_NAME}": {
+        "api-node": {
             "image": "${API_NODE_NAME}:latest",
             "restart": "unless-stopped",
-            # No external port — accessed via nginx only
+            "container_name": "${API_NODE_NAME}",
             "healthcheck": {
                 "test": ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"],
                 "interval": "15s",
@@ -19,7 +19,7 @@ SERVICE = {
             },
         }
     },
-    "nginx_upstream":   "${API_NODE_NAME}:3000",
+    "nginx_upstream":   "api-node:3000",
     "nginx_domain_var": "API_NODE_DOMAIN",
     "volumes": [],
     "post_install_note": (

@@ -235,22 +235,36 @@ def pick_or_create_service(all_svcs: list[dict], templates_dir: Path) -> dict | 
     if new_id == svc["id"]:
         return svc  # same id, no renaming needed
 
-    # Rename all keys and compose service names that reference the old id
     old_id  = svc["id"]
     old_key = old_id.upper().replace("-", "_")
     new_key = new_id.upper().replace("-", "_")
 
-    def rename(v):
+    # Rename values (env vars, image names, upstream) but NOT compose service keys
+    # Compose service keys must be static strings — variables not allowed there
+    def rename_val(v):
         if isinstance(v, str):
             return v.replace(old_id, new_id).replace(old_key, new_key)
         if isinstance(v, list):
-            return [rename(i) for i in v]
+            return [rename_val(i) for i in v]
         if isinstance(v, dict):
-            return {rename(k): rename(val) for k, val in v.items()}
+            return {k: rename_val(val) for k, val in v.items()}
         return v
 
-    svc = rename(svc)
-    svc["id"] = new_id
+    # Rebuild compose with new static key derived from new_id
+    new_compose = {}
+    for old_svc_key, svc_def in svc["compose"].items():
+        new_svc_key = new_id  # use new_id as the static compose service name
+        new_compose[new_svc_key] = rename_val(svc_def)
+
+    svc = rename_val(svc)
+    svc["id"]      = new_id
+    svc["compose"] = new_compose
+
+    # Fix nginx_upstream to point to new static service name
+    if svc.get("nginx_upstream"):
+        # replace the old service key in upstream (e.g. "api-rust:3000" -> "sensor-api:3000")
+        svc["nginx_upstream"] = f"{new_id}:{svc['nginx_upstream'].split(':')[-1]}"
+
     return svc
 
 

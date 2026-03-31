@@ -3,10 +3,9 @@ SERVICE = {
     "name": "PostgreSQL",
     "description": "PostgreSQL database server",
     "questions": [
-        {"key": "POSTGRES_PORT", "label": "External port",    "default": "5432"},
-        {"key": "POSTGRES_USER", "label": "Username",         "default": "postgres"},
-        {"key": "POSTGRES_PASS", "label": "Password",         "default": "changeme"},
-        {"key": "POSTGRES_DB",   "label": "Database name",    "default": "appdb"},
+        {"key": "POSTGRES_USER", "label": "Username",      "default": "postgres"},
+        {"key": "POSTGRES_PASS", "label": "Password",      "default": "changeme"},
+        {"key": "POSTGRES_DB",   "label": "Database name", "default": "appdb"},
     ],
     "compose": {
         "postgres": {
@@ -18,7 +17,8 @@ SERVICE = {
                 "POSTGRES_DB=${POSTGRES_DB}",
             ],
             "volumes": ["./data/postgres:/var/lib/postgresql/data"],
-            "ports": ["${POSTGRES_PORT}:5432"],
+            # No external port — internal only via infra network
+            # To access from host: ssh tunnel or add ports: ["5433:5432"] manually
             "healthcheck": {
                 "test": ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"],
                 "interval": "10s",

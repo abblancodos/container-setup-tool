@@ -87,6 +87,7 @@ BUILTIN_SERVICES = [
     "gitea_runner",
     "api_node",
     "api_rust",
+    "svelte_app",
     "wikijs",
     "nginx",
 ]
@@ -191,6 +192,178 @@ def step_directory() -> Path:
     return output_dir
 
 
+# ─────────────────────────── container manager ──────────────────
+
+def _docker(args: list[str], output_dir: Path, capture=False):
+    cmd = ["docker", "compose", "--project-directory", str(output_dir)] + args
+    if capture:
+        return subprocess.run(cmd, capture_output=True, text=True, cwd=output_dir)
+    return subprocess.run(cmd, cwd=output_dir)
+
+
+def _running_services(output_dir: Path) -> list[dict]:
+    """Return list of {name, image, status} for all compose services."""
+    r = _docker(["ps", "--format", "{{.Service}}|{{.Image}}|{{.Status}}"],
+                output_dir, capture=True)
+    services = []
+    for line in r.stdout.splitlines():
+        parts = line.split("|")
+        if len(parts) == 3:
+            services.append({"name": parts[0], "image": parts[1], "status": parts[2]})
+    return services
+
+
+def _all_services(output_dir: Path) -> list[str]:
+    """Return all service names from compose files."""
+    names = []
+    env_vars: dict = {}
+    env_file = output_dir / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            env_vars[k.strip()] = v.strip()
+
+    def resolve(s):
+        return re.sub(r"\$\{([^}]+)\}", lambda m: env_vars.get(m.group(1), m.group(0)), s)
+
+    seen = set()
+    for cf in sorted(output_dir.glob("docker-compose*.yml")):
+        data = yaml.safe_load(cf.read_text()) or {}
+        for svc in (data.get("services") or {}):
+            resolved = resolve(svc)
+            if resolved not in seen:
+                seen.add(resolved)
+                names.append(resolved)
+    return names
+
+
+def step_manage(output_dir: Path):
+    section("Container manager")
+
+    while True:
+        running  = _running_services(output_dir)
+        all_svcs = _all_services(output_dir)
+
+        # Build status table
+        status_map = {s["name"]: s for s in running}
+        console.print("[dim]Services:[/dim]")
+        for name in all_svcs:
+            if name in status_map:
+                st = status_map[name]["status"]
+                img = status_map[name]["image"]
+                color = "green" if "Up" in st else "yellow"
+                console.print(f"  [{color}]●[/{color}]  {name:<25} [dim]{img}[/dim]  [dim]{st}[/dim]")
+            else:
+                console.print(f"  [dim]○  {name}[/dim]")
+        console.print()
+
+        action = questionary.select(
+            "What do you want to do?",
+            choices=[
+                questionary.Choice("Start missing containers",   value="start"),
+                questionary.Choice("Stop a container",           value="stop"),
+                questionary.Choice("Restart a container",        value="restart"),
+                questionary.Choice("View logs",                  value="logs"),
+                questionary.Choice("Change image of a service",  value="image"),
+                questionary.Separator(),
+                questionary.Choice("Back",                       value="back"),
+            ],
+        ).ask()
+
+        if action in ("back", None):
+            break
+
+        elif action == "start":
+            not_running = [s for s in all_svcs if s not in status_map]
+            if not not_running:
+                console.print("[dim]All services are already running.[/dim]\n")
+                continue
+            to_start = questionary.checkbox(
+                "Select services to start:",
+                choices=[questionary.Choice(s, value=s) for s in not_running],
+            ).ask() or []
+            if to_start:
+                _docker(["up", "-d"] + to_start, output_dir)
+            console.print()
+
+        elif action == "stop":
+            if not running:
+                console.print("[dim]No running containers.[/dim]\n")
+                continue
+            to_stop = questionary.checkbox(
+                "Select services to stop:",
+                choices=[questionary.Choice(s["name"], value=s["name"]) for s in running],
+            ).ask() or []
+            if to_stop:
+                _docker(["stop"] + to_stop, output_dir)
+            console.print()
+
+        elif action == "restart":
+            choices = [questionary.Choice(s["name"], value=s["name"]) for s in running]
+            choices += [questionary.Choice(s, value=s) for s in all_svcs if s not in status_map]
+            to_restart = questionary.checkbox("Select services to restart:", choices=choices).ask() or []
+            if to_restart:
+                _docker(["restart"] + to_restart, output_dir)
+            console.print()
+
+        elif action == "logs":
+            choices = [questionary.Choice(s["name"], value=s["name"]) for s in running]
+            if not choices:
+                console.print("[dim]No running containers.[/dim]\n")
+                continue
+            svc = questionary.select("Which service?", choices=choices).ask()
+            if svc:
+                lines = questionary.text("How many lines?", default="50").ask() or "50"
+                _docker(["logs", "--tail", lines, "-f", svc], output_dir)
+            console.print()
+
+        elif action == "image":
+            choices = [questionary.Choice(
+                f"{s}  [dim]{status_map[s]['image'] if s in status_map else 'not running'}[/dim]",
+                value=s
+            ) for s in all_svcs]
+            svc = questionary.select("Which service?", choices=choices).ask()
+            if not svc:
+                continue
+
+            # Find current image in compose file
+            current_image = ""
+            for cf in sorted(output_dir.glob("docker-compose*.yml")):
+                data = yaml.safe_load(cf.read_text()) or {}
+                for svc_name, svc_def in (data.get("services") or {}).items():
+                    if svc_name == svc and svc_def.get("image"):
+                        current_image = svc_def["image"]
+                        current_file  = cf
+                        break
+
+            new_image = questionary.text(
+                f"New image for {svc}:",
+                default=current_image,
+            ).ask()
+
+            if new_image and new_image != current_image:
+                # Update the compose file
+                cf_content = current_file.read_text()
+                cf_content = cf_content.replace(
+                    f"image: {current_image}",
+                    f"image: {new_image}",
+                )
+                current_file.write_text(cf_content)
+                console.print(f"[green]✔[/green]  Updated {current_file.name}")
+
+                pull = questionary.confirm("Pull new image now?", default=True).ask()
+                if pull:
+                    _docker(["pull", new_image.split(":")[0]], output_dir)
+
+                restart = questionary.confirm(f"Restart {svc} with new image?", default=True).ask()
+                if restart:
+                    _docker(["up", "-d", "--force-recreate", svc], output_dir)
+            console.print()
+
+
 # ─────────────────────────── template picker ────────────────────
 
 def pick_or_create_service(all_svcs: list[dict], templates_dir: Path) -> dict | None:
@@ -290,12 +463,17 @@ def step_services(output_dir: Path) -> list[dict]:
             "What do you want to do?",
             choices=[
                 questionary.Choice("Modify existing stack (add / remove services)", value="modify"),
+                questionary.Choice("Manage containers (start / stop / restart / logs / image)", value="manage"),
                 questionary.Choice("Generate a new stack from scratch (overwrites)",  value="new"),
                 questionary.Choice("Exit", value="exit"),
             ],
         ).ask()
 
         if action in ("exit", None):
+            sys.exit(0)
+
+        if action == "manage":
+            step_manage(output_dir)
             sys.exit(0)
     else:
         console.print("[dim]No existing stack found. Starting from scratch.[/dim]\n")
@@ -517,10 +695,90 @@ def step_generate(selected_services: list[dict], answers: dict, output_dir: Path
     return override_paths
 
 
-# ─────────────────────────── step 5: summary ────────────────────
+# ─────────────────────────── step 5: launch ────────────────────
+
+def step_launch(output_dir: Path):
+    section("5 · Starting containers")
+
+    result = subprocess.run(
+        ["docker", "images", "--format", "{{.Repository}}:{{.Tag}}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        console.print("[yellow]⚠  Could not query Docker — skipping auto-launch.[/yellow]")
+        console.print("[dim]Run: docker compose up -d manually.[/dim]")
+        return
+
+    available_images = set(result.stdout.splitlines())
+
+    env_vars: dict = {}
+    env_file = output_dir / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            env_vars[k.strip()] = v.strip()
+
+    def resolve(s: str) -> str:
+        return re.sub(r"\$\{([^}]+)\}", lambda m: env_vars.get(m.group(1), m.group(0)), s)
+
+    launchable = []
+    skipped    = []
+    seen: set  = set()
+
+    for cf in sorted(output_dir.glob("docker-compose*.yml")):
+        data = yaml.safe_load(cf.read_text()) or {}
+        for svc_name, svc_def in (data.get("services") or {}).items():
+            if svc_name in seen:
+                continue
+            seen.add(svc_name)
+            image = resolve(svc_def.get("image", ""))
+            if not image or image.startswith("$"):
+                skipped.append(svc_name)
+                continue
+            if ":" not in image:
+                image += ":latest"
+            repo = image.split(":")[0]
+            if image in available_images or any(i.startswith(repo + ":") for i in available_images):
+                launchable.append(svc_name)
+            else:
+                skipped.append(svc_name)
+
+    if not launchable:
+        console.print("[yellow]No images available locally yet — nothing to start.[/yellow]")
+        console.print("[dim]Pull images first: docker compose pull[/dim]")
+        return
+
+    console.print(f"[dim]Images ready for {len(launchable)} service(s):[/dim]")
+    for s in launchable:
+        console.print(f"  [green]✔[/green]  {s}")
+    if skipped:
+        console.print(f"\n[dim]Skipping {len(skipped)} — image not built yet:[/dim]")
+        for s in skipped:
+            console.print(f"  [dim]○  {s}[/dim]")
+
+    console.print()
+    ok = questionary.confirm(
+        f"Start {len(launchable)} available container(s) now?", default=True
+    ).ask()
+    if not ok:
+        console.print("[dim]Skipped. Run: docker compose up -d when ready.[/dim]")
+        return
+
+    cmd = ["docker", "compose", "--project-directory", str(output_dir),
+           "up", "-d"] + launchable
+    console.print()
+    result = subprocess.run(cmd, cwd=output_dir)
+    if result.returncode == 0:
+        console.print(f"\n[green]✔[/green]  {len(launchable)} container(s) started.\n")
+    else:
+        console.print("\n[red]✗  docker compose reported errors — check output above.[/red]\n")
+# ─────────────────────────── step 6: summary ────────────────────
 
 def step_summary(selected_services: list[dict], override_paths: list[Path], output_dir: Path, answers: dict):
-    section("5 · Done")
+    section("6 · Done")
 
     console.print(f"[bold]Stack generated at:[/bold] {output_dir}\n")
 
@@ -584,6 +842,7 @@ def main():
 
     step_clone_repos(selected_services, answers, output_dir)
     override_paths = step_generate(selected_services, answers, output_dir)
+    step_launch(output_dir)
     step_summary(selected_services, override_paths, output_dir, answers)
 
 

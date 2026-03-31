@@ -1,0 +1,49 @@
+# ── Dockerfile.frontend — dbsync SvelteKit admin panel ───────────────────────
+#
+# Stages:
+#   dev   → vite dev server with HMR (mount source via volume)
+#   prod  → multi-stage: node:alpine builder → node:alpine runtime (no devDeps)
+#
+# Build:
+#   docker build --target prod -t dbsync-frontend .
+#   docker build --target dev  -t dbsync-frontend-dev .
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG NODE_VERSION=20
+
+# ── dev stage ─────────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS dev
+WORKDIR /app
+COPY frontend/package*.json ./
+RUN npm ci
+# Source mounted at runtime via volume
+EXPOSE 5173
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD wget -qO- http://localhost:5173/ > /dev/null || exit 1
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+
+# ── builder (prod only) ───────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS builder
+WORKDIR /app
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ .
+# PUBLIC_API_URL injected at build time via --build-arg or compose build args
+ARG PUBLIC_API_URL=http://localhost:3000
+ENV PUBLIC_API_URL=${PUBLIC_API_URL}
+RUN npm run build
+
+# ── prod stage ────────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS prod
+WORKDIR /app
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/package*.json ./
+RUN npm ci --omit=dev
+
+USER appuser
+EXPOSE 3000
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD wget -qO- http://localhost:3000/ > /dev/null || exit 1
+CMD ["node", "build"]

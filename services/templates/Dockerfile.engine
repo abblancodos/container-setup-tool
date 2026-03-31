@@ -1,0 +1,59 @@
+# ── Dockerfile.engine — dbsync Rust/Axum API ─────────────────────────────────
+#
+# Stages:
+#   dev   → fast iteration: mounts source at runtime via volume, uses cargo-watch
+#   prod  → multi-stage: tiny debian-slim image, no Rust toolchain at runtime
+#
+# Build:
+#   docker build --target prod -t dbsync-engine .
+#   docker build --target dev  -t dbsync-engine-dev .
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARG RUST_VERSION=1.80
+
+# ── dependency cache layer (shared between dev and prod) ─────────────────────
+FROM rust:${RUST_VERSION}-slim AS deps
+WORKDIR /app
+
+# Install build deps (pkg-config needed by some crates; no libpq — using sqlx pure-rust)
+RUN apt-get update && apt-get install -y pkg-config && rm -rf /var/lib/apt/lists/*
+
+# Cache dependencies before copying source
+# (dummy main lets cargo fetch + compile deps without the real source)
+COPY engine/Cargo.toml engine/Cargo.lock ./
+RUN mkdir src && echo "fn main(){}" > src/main.rs \
+    && cargo build --release \
+    && rm -rf src
+
+# ── dev stage ─────────────────────────────────────────────────────────────────
+FROM deps AS dev
+RUN cargo install cargo-watch
+COPY engine/src ./src
+ENV RUST_LOG=debug
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+CMD ["cargo-watch", "-x", "run"]
+
+# ── builder (prod only) ───────────────────────────────────────────────────────
+FROM deps AS builder
+COPY engine/src ./src
+RUN cargo build --release
+
+# ── prod stage ────────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS prod
+RUN apt-get update \
+    && apt-get install -y ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/dbsync-engine /usr/local/bin/dbsync-engine
+
+RUN useradd -r -s /bin/false appuser
+USER appuser
+
+ENV RUST_LOG=info
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+CMD ["dbsync-engine"]

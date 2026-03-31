@@ -1,0 +1,12 @@
+id: example
+name: example
+description: example
+questions: []
+compose:
+  example:
+    image: debian:bookworm
+    restart: unless-stopped
+nginx_upstream: null
+nginx_domain_var: null
+volumes: []
+post_install_note: null

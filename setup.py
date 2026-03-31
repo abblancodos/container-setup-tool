@@ -5,6 +5,7 @@ Usage: python3 setup.py
 """
 
 import os
+import re
 import sys
 import importlib
 import subprocess
@@ -101,17 +102,38 @@ def load_builtin(name: str) -> dict:
 
 
 def detect_existing(output_dir: Path) -> list[str]:
-    """Detect configured services by reading all docker-compose*.yml files."""
+    """Detect configured services by reading all docker-compose*.yml files.
+    Resolves ${VAR} references using .env if present."""
     compose_files = sorted(output_dir.glob("docker-compose*.yml"))
     if not compose_files:
         return []
+
+    # Load .env for variable resolution
+    env_vars: dict = {}
+    env_file = output_dir / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            env_vars[k.strip()] = v.strip()
+
+    def resolve(name: str) -> str:
+        return re.sub(
+            r"\$\{([^}]+)\}",
+            lambda m: env_vars.get(m.group(1), m.group(0)),
+            name,
+        )
+
     services = []
     for cf in compose_files:
         with open(cf) as f:
             data = yaml.safe_load(f) or {}
         for svc in (data.get("services") or {}):
-            if svc not in services:
-                services.append(svc)
+            resolved = resolve(svc)
+            if resolved not in services:
+                services.append(resolved)
     return services
 
 

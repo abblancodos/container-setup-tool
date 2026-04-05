@@ -21,11 +21,28 @@ def _dump(data: dict, path: Path):
         yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
-def _service_block(svc: dict) -> dict:
+def _resolve_volumes(definition: dict, data_dir: Path) -> dict:
+    """Rewrite ./data/<rel> volume paths to use the configured data_dir."""
+    defn = dict(definition)
+    if "volumes" in defn:
+        new_vols = []
+        for vol in defn["volumes"]:
+            if isinstance(vol, str) and vol.startswith("./data/"):
+                parts = vol.split(":", 1)
+                rel = parts[0][len("./data/"):]
+                host_path = str(data_dir / rel)
+                new_vols.append(f"{host_path}:{parts[1]}" if len(parts) == 2 else host_path)
+            else:
+                new_vols.append(vol)
+        defn["volumes"] = new_vols
+    return defn
+
+
+def _service_block(svc: dict, output_dir: Path, data_dir: Path) -> dict:
     """Construye el bloque services: para un servicio, añadiendo la red infra."""
     block = {}
     for name, definition in svc["compose"].items():
-        defn = dict(definition)
+        defn = _resolve_volumes(dict(definition), data_dir)
         defn.setdefault("networks", ["infra"])
         block[name] = defn
     return block
@@ -37,6 +54,7 @@ def generate_compose_layers(
     always_services: list[dict],
     optional_services: list[dict],
     output_dir: Path,
+    data_dir: Path,
 ) -> tuple[Path, list[Path]]:
     """
     Genera:
@@ -51,7 +69,7 @@ def generate_compose_layers(
         "services": {},
     }
     for svc in always_services:
-        base["services"].update(_service_block(svc))
+        base["services"].update(_service_block(svc, output_dir, data_dir))
 
     base_path = output_dir / "docker-compose.yml"
     _dump(base, base_path)
@@ -60,7 +78,7 @@ def generate_compose_layers(
     override_paths = []
     for svc in optional_services:
         override = {
-            "services": _service_block(svc),
+            "services": _service_block(svc, output_dir, data_dir),
             "networks": {"infra": {}},   # referencia a la red del base
         }
         path = output_dir / f"docker-compose.{svc['id']}.yml"
@@ -161,11 +179,13 @@ def generate_nginx_vhosts(
 
 # ── directorios de datos ─────────────────────────────────────────
 
-def create_data_dirs(selected_services: list[dict], output_dir: Path) -> list[Path]:
+def create_data_dirs(selected_services: list[dict], data_dir: Path) -> list[Path]:
     created = []
     for svc in selected_services:
         for vol_path in svc.get("volumes", []):
-            full = output_dir / vol_path
+            # Strip ./data/ prefix — paths are now relative to data_dir
+            rel = vol_path.removeprefix("./data/").removeprefix("./")
+            full = data_dir / rel
             full.mkdir(parents=True, exist_ok=True)
             created.append(full)
     return created

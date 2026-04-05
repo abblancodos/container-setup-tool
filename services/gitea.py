@@ -1,3 +1,5 @@
+from pathlib import Path
+
 SERVICE = {
     "id": "gitea",
     "name": "Gitea",
@@ -35,6 +37,10 @@ SERVICE = {
     "nginx_upstream":   "gitea:3000",
     "nginx_domain_var": "GITEA_DOMAIN",
     "volumes": ["./data/gitea", "./data/gitea-db"],
+    "post_create_hook": lambda data_dir: [
+        # gitea:latest-rootless runs as UID 1000 — fix permissions on data dir
+        ["sudo", "chown", "-R", "1000:1000", str(Path(data_dir) / "gitea")],
+    ],
     "post_install_note": (
         "ℹ  Open Gitea via nginx to complete the install wizard.\n"
         "   Point your Caddy/Cloudflare domain to this server."

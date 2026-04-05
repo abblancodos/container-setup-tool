@@ -166,30 +166,43 @@ def section(title: str):
 
 # ─────────────────────────── step 1: directory ──────────────────
 
-def step_directory() -> Path:
-    section("1 · Install directory")
-
-    raw = questionary.text(
-        "Where do you want to install the stack?",
-        default=str(Path.cwd()),
-    ).ask()
-
+def _ask_directory(prompt: str, default: str) -> Path:
+    """Pregunta por un directorio y advierte si requiere sudo."""
+    console.print(
+        "[dim]  ℹ  If the path is not writable by the current user, "
+        "re-run the tool with sudo.[/dim]"
+    )
+    raw = questionary.text(prompt, default=default).ask()
     if raw is None:
         sys.exit(0)
-
-    output_dir = Path(raw).expanduser().resolve()
-
-    if needs_sudo(output_dir):
+    p = Path(raw).expanduser().resolve()
+    if needs_sudo(p):
         console.print(
-            f"[yellow]⚠  {output_dir} is outside your home directory — "
-            f"you may need sudo to write files there.[/yellow]"
+            f"[yellow]  ⚠  {p} is outside your home directory — "
+            f"you may need to run: sudo python3 setup.py[/yellow]"
         )
         if not questionary.confirm("Continue anyway?", default=False).ask():
             sys.exit(0)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    console.print(f"[green]✔[/green]  Directory: [bold]{output_dir}[/bold]\n")
-    return output_dir
+
+def step_directory() -> tuple[Path, Path]:
+    section("1 · Install directory")
+
+    output_dir = _ask_directory(
+        "Where do you want to install the stack?",
+        str(Path.cwd()),
+    )
+    console.print(f"[green]✔[/green]  Stack directory: [bold]{output_dir}[/bold]")
+
+    data_dir = _ask_directory(
+        "Where do you want to store persistent data?",
+        str(output_dir / "data"),
+    )
+    console.print(f"[green]✔[/green]  Data directory:  [bold]{data_dir}[/bold]\n")
+
+    return output_dir, data_dir
 
 
 # ─────────────────────────── container manager ──────────────────
@@ -670,13 +683,13 @@ def step_clone_repos(selected_services: list[dict], answers: dict, output_dir: P
 
 # ─────────────────────────── step 4: generate ───────────────────
 
-def step_generate(selected_services: list[dict], answers: dict, output_dir: Path) -> list[Path]:
+def step_generate(selected_services: list[dict], answers: dict, output_dir: Path, data_dir: Path) -> list[Path]:
     section("4 · Generating files")
 
     always   = [s for s in selected_services if s["id"] in ALWAYS_ON]
     optional = [s for s in selected_services if s["id"] not in ALWAYS_ON]
 
-    base_path, override_paths = generate_compose_layers(always, optional, output_dir)
+    base_path, override_paths = generate_compose_layers(always, optional, output_dir, data_dir)
     console.print(f"[green]✔[/green]  {base_path.name}  [dim](base: network + always-on services)[/dim]")
     for p in override_paths:
         console.print(f"[green]✔[/green]  {p.name}")
@@ -689,10 +702,29 @@ def step_generate(selected_services: list[dict], answers: dict, output_dir: Path
         for domain, path in vhosts:
             console.print(f"[green]✔[/green]  nginx/conf.d/{path.name}  [dim]→ {domain}[/dim]")
 
-    dirs = create_data_dirs(selected_services, output_dir)
+    dirs = create_data_dirs(selected_services, data_dir)
     console.print(f"[green]✔[/green]  {len(dirs)} data director{'y' if len(dirs)==1 else 'ies'} created\n")
 
+    # Post-install hooks (e.g. chown for rootless containers)
+    run_post_hooks(selected_services, data_dir)
+
     return override_paths
+
+
+# ─────────────────────────── post hooks ────────────────────────
+
+def run_post_hooks(selected_services: list[dict], data_dir: Path):
+    for svc in selected_services:
+        hook = svc.get("post_create_hook")
+        if not hook:
+            continue
+        for cmd in hook(data_dir):
+            console.print(f"[dim]  $ {' '.join(cmd)}[/dim]")
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                console.print(f"[yellow]  ⚠  Hook failed: {result.stderr.strip()}[/yellow]")
+            else:
+                console.print(f"[green]  ✔[/green]  {cmd[-1]}")
 
 
 # ─────────────────────────── step 5: launch ────────────────────
@@ -831,9 +863,9 @@ def step_summary(selected_services: list[dict], override_paths: list[Path], outp
 def main():
     header()
 
-    output_dir        = step_directory()
-    selected_services = step_services(output_dir)
-    answers           = step_configure(selected_services, output_dir)
+    output_dir, data_dir = step_directory()
+    selected_services    = step_services(output_dir)
+    answers              = step_configure(selected_services, output_dir)
 
     console.print()
     if not questionary.confirm("Everything looks good? Generate the files.", default=True).ask():
@@ -841,7 +873,7 @@ def main():
         sys.exit(0)
 
     step_clone_repos(selected_services, answers, output_dir)
-    override_paths = step_generate(selected_services, answers, output_dir)
+    override_paths = step_generate(selected_services, answers, output_dir, data_dir)
     step_launch(output_dir)
     step_summary(selected_services, override_paths, output_dir, answers)
 

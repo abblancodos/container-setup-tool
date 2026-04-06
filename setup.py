@@ -478,6 +478,7 @@ def step_services(output_dir: Path) -> list[dict]:
                 questionary.Choice("Modify existing stack (add / remove services)", value="modify"),
                 questionary.Choice("Manage containers (start / stop / restart / logs / image)", value="manage"),
                 questionary.Choice("Bootstrap services (initial wizard setup)", value="bootstrap"),
+                questionary.Choice("Update domains (change BASE_DOMAIN + nginx server_names)", value="domains"),
                 questionary.Choice("Generate a new stack from scratch (overwrites)",  value="new"),
                 questionary.Choice("Exit", value="exit"),
             ],
@@ -496,6 +497,10 @@ def step_services(output_dir: Path) -> list[dict]:
             all_svcs = builtin + custom
             existing_svcs = [s for s in all_svcs if s["id"] in existing]
             step_bootstrap(output_dir, existing_svcs)
+            sys.exit(0)
+
+        if action == "domains":
+            step_update_domains(output_dir)
             sys.exit(0)
     else:
         console.print("[dim]No existing stack found. Starting from scratch.[/dim]\n")
@@ -816,6 +821,94 @@ def step_launch(output_dir: Path):
         console.print(f"\n[green]✔[/green]  {len(launchable)} container(s) started.\n")
     else:
         console.print("\n[red]✗  docker compose reported errors — check output above.[/red]\n")
+# ─────────────────────────── step_update_domains ───────────────
+
+def step_update_domains(output_dir: Path):
+    section("Update domains")
+
+    # Leer .env actual
+    env_file = output_dir / ".env"
+    if not env_file.exists():
+        console.print("[red]✗  No .env found in stack directory.[/red]")
+        return
+
+    env_vars: dict = {}
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        env_vars[k.strip()] = v.strip()
+
+    current_domain = env_vars.get("BASE_DOMAIN", "localhost")
+    console.print(f"[dim]Current BASE_DOMAIN: {current_domain}[/dim]\n")
+
+    new_domain = questionary.text(
+        "New base domain (e.g. nm.35-208-114-233.nip.io or mylab.com):",
+        default=current_domain,
+    ).ask()
+    if not new_domain or new_domain == current_domain:
+        console.print("[dim]No change.[/dim]")
+        return
+
+    nginx_conf_dir = output_dir / "nginx" / "conf.d"
+    if not nginx_conf_dir.exists():
+        console.print("[yellow]⚠  No nginx/conf.d directory found.[/yellow]")
+        return
+
+    # Cargar todos los servicios para obtener nginx_domain_var
+    builtin  = [load_builtin(s) for s in BUILTIN_SERVICES]
+    custom   = load_custom_templates(TMPL_DIR)
+    all_svcs = builtin + custom
+
+    updated = []
+    for svc in all_svcs:
+        domain_var = svc.get("nginx_domain_var")
+        if not domain_var:
+            continue
+        conf_path = nginx_conf_dir / f"{svc['id']}.conf"
+        if not conf_path.exists():
+            continue
+        subdomain = env_vars.get(domain_var, svc["id"])
+        new_server_name = f"{subdomain}.{new_domain}"
+
+        content = conf_path.read_text()
+        # Reemplaza cualquier server_name existente
+        import re
+        content = re.sub(
+            r"server_name\s+[^;]+;",
+            f"server_name {new_server_name};",
+            content,
+        )
+        conf_path.write_text(content)
+        updated.append((svc["name"], new_server_name))
+        console.print(f"[green]✔[/green]  {svc['name']} → {new_server_name}")
+
+    if not updated:
+        console.print("[yellow]No nginx confs found to update.[/yellow]")
+        return
+
+    # Actualizar BASE_DOMAIN en .env
+    env_content = env_file.read_text()
+    env_content = re.sub(r"BASE_DOMAIN=.*", f"BASE_DOMAIN={new_domain}", env_content)
+    env_file.write_text(env_content)
+    console.print(f"[green]✔[/green]  .env BASE_DOMAIN updated to {new_domain}")
+
+    # Reiniciar nginx
+    console.print("\n[dim]Restarting nginx...[/dim]")
+    result = subprocess.run(
+        ["docker", "compose", "--project-directory", str(output_dir), "restart", "nginx"],
+        capture_output=True, text=True, cwd=output_dir,
+    )
+    if result.returncode == 0:
+        console.print("[green]✔[/green]  nginx restarted\n")
+    else:
+        console.print(f"[yellow]⚠  nginx restart failed: {result.stderr.strip()}[/yellow]")
+        console.print("[dim]Run: docker restart server-lab-nginx-1 manually[/dim]\n")
+
+    console.print("[bold]Done.[/bold] Update your reverse proxy (Caddy/Cloudflare) to point to this server.\n")
+
+
 # ─────────────────────────── step_bootstrap ────────────────────
 
 BOOTSTRAP_STATE_FILE = ".bootstrap-state.json"

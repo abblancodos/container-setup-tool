@@ -477,6 +477,7 @@ def step_services(output_dir: Path) -> list[dict]:
             choices=[
                 questionary.Choice("Modify existing stack (add / remove services)", value="modify"),
                 questionary.Choice("Manage containers (start / stop / restart / logs / image)", value="manage"),
+                questionary.Choice("Bootstrap services (initial wizard setup)", value="bootstrap"),
                 questionary.Choice("Generate a new stack from scratch (overwrites)",  value="new"),
                 questionary.Choice("Exit", value="exit"),
             ],
@@ -487,6 +488,14 @@ def step_services(output_dir: Path) -> list[dict]:
 
         if action == "manage":
             step_manage(output_dir)
+            sys.exit(0)
+
+        if action == "bootstrap":
+            builtin  = [load_builtin(s) for s in BUILTIN_SERVICES]
+            custom   = load_custom_templates(TMPL_DIR)
+            all_svcs = builtin + custom
+            existing_svcs = [s for s in all_svcs if s["id"] in existing]
+            step_bootstrap(output_dir, existing_svcs)
             sys.exit(0)
     else:
         console.print("[dim]No existing stack found. Starting from scratch.[/dim]\n")
@@ -807,6 +816,117 @@ def step_launch(output_dir: Path):
         console.print(f"\n[green]✔[/green]  {len(launchable)} container(s) started.\n")
     else:
         console.print("\n[red]✗  docker compose reported errors — check output above.[/red]\n")
+# ─────────────────────────── step_bootstrap ────────────────────
+
+BOOTSTRAP_STATE_FILE = ".bootstrap-state.json"
+
+
+def _load_bootstrap_state(output_dir: Path) -> dict:
+    state_file = output_dir / BOOTSTRAP_STATE_FILE
+    if state_file.exists():
+        import json
+        return json.loads(state_file.read_text())
+    return {}
+
+
+def _save_bootstrap_state(output_dir: Path, state: dict):
+    import json
+    state_file = output_dir / BOOTSTRAP_STATE_FILE
+    state_file.write_text(json.dumps(state, indent=2))
+
+
+def _is_bootstrap_done(svc: dict, state: dict) -> bool:
+    """Check via saved state or by running the service's check_cmd."""
+    svc_id = svc["id"]
+    if state.get(svc_id) == "done":
+        return True
+    check_cmd = svc.get("bootstrap", {}).get("check_cmd")
+    if check_cmd:
+        result = subprocess.run(check_cmd, capture_output=True)
+        return result.returncode == 0
+    return False
+
+
+def _set_default_server(nginx_conf_dir: Path, upstream_conf: str, enable: bool):
+    """Add or remove default_server from a given nginx conf file."""
+    conf_path = nginx_conf_dir / upstream_conf
+    if not conf_path.exists():
+        return
+    content = conf_path.read_text()
+    if enable:
+        content = content.replace("listen 80;", "listen 80 default_server;", 1)
+    else:
+        content = content.replace("listen 80 default_server;", "listen 80;")
+    conf_path.write_text(content)
+
+
+def step_bootstrap(output_dir: Path, selected_services: list[dict]):
+    bootstrap_svcs = [s for s in selected_services if s.get("bootstrap")]
+    if not bootstrap_svcs:
+        return
+
+    section("Bootstrap — Initial wizard setup")
+
+    state = _load_bootstrap_state(output_dir)
+    nginx_conf_dir = output_dir / "nginx" / "conf.d"
+
+    # Show status table
+    console.print("[dim]Services requiring initial setup:[/dim]")
+    for svc in bootstrap_svcs:
+        done = _is_bootstrap_done(svc, state)
+        mark = "[green]✔  done[/green]" if done else "[yellow]○  pending[/yellow]"
+        console.print(f"  {mark}  {svc['name']}")
+    console.print()
+
+    pending = [s for s in bootstrap_svcs if not _is_bootstrap_done(s, state)]
+    if not pending:
+        console.print("[green]All services already bootstrapped.[/green]\n")
+        return
+
+    ok = questionary.confirm(
+        f"Run bootstrap wizard for {len(pending)} pending service(s)?",
+        default=True,
+    ).ask()
+    if not ok:
+        console.print("[dim]Skipped. Run setup.py again when ready.[/dim]\n")
+        return
+
+    for svc in pending:
+        bootstrap = svc["bootstrap"]
+        console.print(f"\n[bold cyan]── {svc['name']} ──[/bold cyan]")
+        console.print(f"[dim]{bootstrap['note']}[/dim]\n")
+
+        # Find this service's nginx conf and set it as default_server
+        nginx_conf = f"{svc['id']}.conf"
+        has_nginx = (nginx_conf_dir / nginx_conf).exists()
+        if has_nginx:
+            _set_default_server(nginx_conf_dir, nginx_conf, enable=True)
+            subprocess.run(["docker", "restart", "server-lab-nginx-1"],
+                           capture_output=True)
+            console.print("[green]✔[/green]  nginx default_server set — open [bold]http://<server-ip>[/bold] in your browser")
+
+        questionary.text(
+            f"Press Enter when you have finished the {svc['name']} wizard (or type 'skip' to skip):",
+            default="",
+        ).ask()
+
+        if has_nginx:
+            _set_default_server(nginx_conf_dir, nginx_conf, enable=False)
+            subprocess.run(["docker", "restart", "server-lab-nginx-1"],
+                           capture_output=True)
+            console.print("[green]✔[/green]  nginx default_server reverted")
+
+        skip = questionary.confirm(
+            f"Mark {svc['name']} as bootstrapped?", default=True
+        ).ask()
+        if skip:
+            state[svc["id"]] = "done"
+            _save_bootstrap_state(output_dir, state)
+            console.print(f"[green]✔[/green]  {svc['name']} marked as done\n")
+
+    console.print("[green]Bootstrap complete.[/green]\n")
+
+
 # ─────────────────────────── step 6: summary ────────────────────
 
 def step_summary(selected_services: list[dict], override_paths: list[Path], output_dir: Path, answers: dict):
@@ -875,6 +995,7 @@ def main():
     step_clone_repos(selected_services, answers, output_dir)
     override_paths = step_generate(selected_services, answers, output_dir, data_dir)
     step_launch(output_dir)
+    step_bootstrap(output_dir, selected_services)
     step_summary(selected_services, override_paths, output_dir, answers)
 
 

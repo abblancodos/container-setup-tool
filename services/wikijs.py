@@ -36,6 +36,15 @@ SERVICE = {
     "nginx_upstream":   "wikijs:3000",
     "nginx_domain_var": "WIKI_DOMAIN",
     "volumes": ["./data/wikijs", "./data/wikijs-db"],
+    "bootstrap": {
+        "label": "Complete Wiki.js setup wizard",
+        "check_cmd": None,  # Wiki.js no tiene archivo de lock fácil de verificar
+        "note": (
+            "Open http://<server-ip> in your browser and complete the setup.\n"
+            "  • Database: PostgreSQL, host wikijs-db:5432, db: wiki, user: wiki\n"
+            "  • Create an admin account when prompted."
+        ),
+    },
     "post_install_note": (
         "ℹ  Wiki.js + Gitea sync: configure at Storage → Git Repository."
     ),

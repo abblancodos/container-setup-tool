@@ -37,6 +37,17 @@ SERVICE = {
     "nginx_upstream":   "gitea:3000",
     "nginx_domain_var": "GITEA_DOMAIN",
     "volumes": ["./data/gitea", "./data/gitea-db"],
+    "bootstrap": {
+        "label": "Complete Gitea install wizard",
+        "check_cmd": ["docker", "exec", "server-lab-gitea-1",
+                      "grep", "-q", "INSTALL_LOCK.*true", "/etc/gitea/app.ini"],
+        "note": (
+            "Open http://<server-ip> in your browser and complete the wizard.\n"
+            "  • Database host: gitea-db:5432\n"
+            "  • Database name: gitea\n"
+            "  • Base URL: set to your final domain if known, or the server IP for now."
+        ),
+    },
     "post_create_hook": lambda data_dir: [
         # gitea:latest-rootless runs as UID 1000 — fix permissions on data dir
         ["sudo", "chown", "-R", "1000:1000", str(Path(data_dir) / "gitea")],

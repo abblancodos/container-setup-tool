@@ -847,17 +847,34 @@ def _is_bootstrap_done(svc: dict, state: dict) -> bool:
     return False
 
 
+def _get_server_ip() -> str:
+    """Obtiene la IP local del servidor via hostname -I."""
+    result = subprocess.run(["hostname", "-I"], capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout.strip().split()[0]
+    return "<server-ip>"
+
+
+def _clear_all_default_servers(nginx_conf_dir: Path):
+    """Quita default_server de todos los confs para evitar duplicados."""
+    if not nginx_conf_dir.exists():
+        return
+    for conf in nginx_conf_dir.glob("*.conf"):
+        content = conf.read_text()
+        if "default_server" in content:
+            conf.write_text(content.replace("listen 80 default_server;", "listen 80;"))
+
+
 def _set_default_server(nginx_conf_dir: Path, upstream_conf: str, enable: bool):
     """Add or remove default_server from a given nginx conf file."""
     conf_path = nginx_conf_dir / upstream_conf
     if not conf_path.exists():
         return
-    content = conf_path.read_text()
+    _clear_all_default_servers(nginx_conf_dir)
     if enable:
+        content = conf_path.read_text()
         content = content.replace("listen 80;", "listen 80 default_server;", 1)
-    else:
-        content = content.replace("listen 80 default_server;", "listen 80;")
-    conf_path.write_text(content)
+        conf_path.write_text(content)
 
 
 def step_bootstrap(output_dir: Path, selected_services: list[dict]):
@@ -869,6 +886,7 @@ def step_bootstrap(output_dir: Path, selected_services: list[dict]):
 
     state = _load_bootstrap_state(output_dir)
     nginx_conf_dir = output_dir / "nginx" / "conf.d"
+    server_ip = _get_server_ip()
 
     # Show status table
     console.print("[dim]Services requiring initial setup:[/dim]")
@@ -893,8 +911,10 @@ def step_bootstrap(output_dir: Path, selected_services: list[dict]):
 
     for svc in pending:
         bootstrap = svc["bootstrap"]
+        note = bootstrap["note"].replace("{server_ip}", server_ip)
+
         console.print(f"\n[bold cyan]── {svc['name']} ──[/bold cyan]")
-        console.print(f"[dim]{bootstrap['note']}[/dim]\n")
+        console.print(f"[dim]{note}[/dim]\n")
 
         # Find this service's nginx conf and set it as default_server
         nginx_conf = f"{svc['id']}.conf"
@@ -903,7 +923,7 @@ def step_bootstrap(output_dir: Path, selected_services: list[dict]):
             _set_default_server(nginx_conf_dir, nginx_conf, enable=True)
             subprocess.run(["docker", "restart", "server-lab-nginx-1"],
                            capture_output=True)
-            console.print("[green]✔[/green]  nginx default_server set — open [bold]http://<server-ip>[/bold] in your browser")
+            console.print(f"[green]✔[/green]  nginx default_server set — open [bold]http://{server_ip}[/bold] in your browser")
 
         questionary.text(
             f"Press Enter when you have finished the {svc['name']} wizard (or type 'skip' to skip):",
@@ -916,10 +936,10 @@ def step_bootstrap(output_dir: Path, selected_services: list[dict]):
                            capture_output=True)
             console.print("[green]✔[/green]  nginx default_server reverted")
 
-        skip = questionary.confirm(
+        mark = questionary.confirm(
             f"Mark {svc['name']} as bootstrapped?", default=True
         ).ask()
-        if skip:
+        if mark:
             state[svc["id"]] = "done"
             _save_bootstrap_state(output_dir, state)
             console.print(f"[green]✔[/green]  {svc['name']} marked as done\n")

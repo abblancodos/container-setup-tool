@@ -42,7 +42,7 @@ SERVICE = {
         "check_cmd": ["docker", "exec", "server-lab-gitea-1",
                       "grep", "-q", "INSTALL_LOCK.*true", "/etc/gitea/app.ini"],
         "note": (
-            "Open http://<server-ip> in your browser and complete the wizard.\n"
+            "Open http://{server_ip} in your browser and complete the wizard.\n"
             "  • Database host: gitea-db:5432\n"
             "  • Database name: gitea\n"
             "  • Base URL: set to your final domain if known, or the server IP for now."

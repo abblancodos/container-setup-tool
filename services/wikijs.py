@@ -1,3 +1,5 @@
+from pathlib import Path
+
 SERVICE = {
     "id": "wikijs",
     "name": "Wiki.js",
@@ -38,13 +40,16 @@ SERVICE = {
     "volumes": ["./data/wikijs", "./data/wikijs-db"],
     "bootstrap": {
         "label": "Complete Wiki.js setup wizard",
-        "check_cmd": None,  # Wiki.js no tiene archivo de lock fácil de verificar
+        "check_cmd": None,
         "note": (
-            "Open http://<server-ip> in your browser and complete the setup.\n"
+            "Open http://{server_ip} in your browser and complete the setup.\n"
             "  • Database: PostgreSQL, host wikijs-db:5432, db: wiki, user: wiki\n"
             "  • Create an admin account when prompted."
         ),
     },
+    "post_create_hook": lambda data_dir: [
+        ["sudo", "chown", "-R", "1000:1000", str(Path(data_dir) / "wikijs")],
+    ],
     "post_install_note": (
         "ℹ  Wiki.js + Gitea sync: configure at Storage → Git Repository."
     ),

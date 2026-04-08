@@ -1,4 +1,56 @@
 from pathlib import Path
+import subprocess
+import yaml
+
+
+def _gitea_post_bootstrap(output_dir: Path, env_vars: dict):
+    """Aplica config post-wizard: ROOT_URL, deshabilita registro, activa Actions."""
+    gitea_domain  = env_vars.get("GITEA_DOMAIN", "git")
+    base_domain   = env_vars.get("BASE_DOMAIN", "")
+    root_url      = f"https://{gitea_domain}.{base_domain}/" if base_domain and base_domain != "localhost" \
+                    else f"http://{gitea_domain}/"
+
+    new_env_vars = [
+        f"GITEA__server__ROOT_URL={root_url}",
+        "GITEA__service__DISABLE_REGISTRATION=true",
+        "GITEA__actions__ENABLED=true",
+    ]
+
+    # Leer el compose de gitea
+    compose_path = output_dir / "docker-compose.gitea.yml"
+    if not compose_path.exists():
+        compose_path = output_dir / "docker-compose.yml"
+    if not compose_path.exists():
+        return [("warn", "Could not find gitea compose file — add env vars manually")]
+
+    with open(compose_path) as f:
+        data = yaml.safe_load(f)
+
+    svc = data.get("services", {}).get("gitea")
+    if not svc:
+        return [("warn", "gitea service not found in compose")]
+
+    existing_env = svc.get("environment", [])
+    # Quitar vars que vamos a sobreescribir
+    keys_to_replace = {v.split("=")[0] for v in new_env_vars}
+    existing_env = [e for e in existing_env if e.split("=")[0] not in keys_to_replace]
+    svc["environment"] = existing_env + new_env_vars
+
+    with open(compose_path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    # Reiniciar gitea
+    subprocess.run(
+        ["docker", "compose", "--project-directory", str(output_dir), "up", "-d", "gitea"],
+        capture_output=True, cwd=output_dir,
+    )
+    return [
+        ("ok", f"ROOT_URL set to {root_url}"),
+        ("ok", "Registration disabled"),
+        ("ok", "Actions enabled"),
+        ("ok", "Gitea restarted"),
+    ]
+
 
 SERVICE = {
     "id": "gitea",
@@ -47,6 +99,7 @@ SERVICE = {
             "  • Database name: gitea\n"
             "  • Base URL: set to your final domain if known, or the server IP for now."
         ),
+        "post_hook": lambda output_dir, env_vars: _gitea_post_bootstrap(output_dir, env_vars),
     },
     "post_create_hook": lambda data_dir: [
         # gitea:latest-rootless runs as UID 1000 — fix permissions on data dir

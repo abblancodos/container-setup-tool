@@ -506,27 +506,45 @@ def step_services(output_dir: Path) -> list[dict]:
         console.print("[dim]No existing stack found. Starting from scratch.[/dim]\n")
         action = "new"
 
-    choices = []
-    for svc in all_svcs:
-        label = f"{svc['name']}  [dim]— {svc['description']}[/dim]"
-        pre   = svc["id"] in existing if action == "modify" else False
-        choices.append(questionary.Choice(label, value=svc["id"], checked=pre))
-    choices.append(questionary.Choice("[+] Add another service...", value="__custom__"))
+    # Loop para permitir agregar múltiples servicios custom
+    extra_services: list[dict] = []  # servicios custom agregados en esta sesión
 
-    selected_ids = questionary.checkbox("Select the services to include:", choices=choices).ask()
-    if selected_ids is None:
-        sys.exit(0)
+    while True:
+        choices = []
+        extra_ids = {s["id"] for s in extra_services}
+        for svc in all_svcs:
+            label = f"{svc['name']}  [dim]— {svc['description']}[/dim]"
+            pre   = svc["id"] in existing if action == "modify" else False
+            choices.append(questionary.Choice(label, value=svc["id"], checked=pre))
+        # Mostrar servicios custom ya agregados como checked
+        for svc in extra_services:
+            if not any(s["id"] == svc["id"] for s in all_svcs):
+                label = f"{svc['name']}  [dim]— custom[/dim]"
+                choices.append(questionary.Choice(label, value=svc["id"], checked=True))
+        choices.append(questionary.Choice("[+] Add another service...", value="__custom__"))
 
-    selected_services = []
-    for sid in selected_ids:
-        if sid == "__custom__":
-            new_svc = pick_or_create_service(all_svcs, TMPL_DIR)
+        selected_ids = questionary.checkbox("Select the services to include:", choices=choices).ask()
+        if selected_ids is None:
+            sys.exit(0)
+
+        # Si seleccionó __custom__, agregar uno y volver al loop
+        if "__custom__" in selected_ids:
+            new_svc = pick_or_create_service(all_svcs + extra_services, TMPL_DIR)
             if new_svc:
-                selected_services.append(new_svc)
-        else:
-            match = next((s for s in all_svcs if s["id"] == sid), None)
+                extra_services.append(new_svc)
+                console.print(f"[green]✔[/green]  Added [bold]{new_svc['name']}[/bold] — select it in the list below\n")
+            continue  # volver a mostrar la lista
+
+        # Selección final — construir lista de servicios
+        selected_services = []
+        for sid in selected_ids:
+            # Buscar en extra_services primero, luego en all_svcs
+            match = next((s for s in extra_services if s["id"] == sid), None)
+            if not match:
+                match = next((s for s in all_svcs if s["id"] == sid), None)
             if match:
                 selected_services.append(match)
+        break
 
     if not selected_services:
         console.print("[yellow]No services selected. Exiting.[/yellow]")
@@ -1036,6 +1054,26 @@ def step_bootstrap(output_dir: Path, selected_services: list[dict]):
             state[svc["id"]] = "done"
             _save_bootstrap_state(output_dir, state)
             console.print(f"[green]✔[/green]  {svc['name']} marked as done\n")
+
+            # Run post_hook if defined
+            post_hook = bootstrap.get("post_hook")
+            if post_hook:
+                # Load .env for context
+                env_vars: dict = {}
+                env_file = output_dir / ".env"
+                if env_file.exists():
+                    for line in env_file.read_text().splitlines():
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, _, v = line.partition("=")
+                        env_vars[k.strip()] = v.strip()
+                results = post_hook(output_dir, env_vars)
+                for level, msg in (results or []):
+                    if level == "ok":
+                        console.print(f"[green]✔[/green]  {msg}")
+                    else:
+                        console.print(f"[yellow]⚠[/yellow]  {msg}")
 
     console.print("[green]Bootstrap complete.[/green]\n")
 

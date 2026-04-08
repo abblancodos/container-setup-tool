@@ -88,6 +88,9 @@ SERVICE = {
     },
     "nginx_upstream":   "gitea:3000",
     "nginx_domain_var": "GITEA_DOMAIN",
+    "domain_env_vars": {
+        "GITEA__server__ROOT_URL": "https://{subdomain}.{base_domain}/",
+    },
     "volumes": ["./data/gitea", "./data/gitea-db"],
     "bootstrap": {
         "label": "Complete Gitea install wizard",

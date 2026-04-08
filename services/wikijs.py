@@ -37,6 +37,9 @@ SERVICE = {
     },
     "nginx_upstream":   "wikijs:3000",
     "nginx_domain_var": "WIKI_DOMAIN",
+    "domain_env_vars": {
+        "WIKI_SITE_URL": "https://{subdomain}.{base_domain}",
+    },
     "volumes": ["./data/wikijs", "./data/wikijs-db"],
     "bootstrap": {
         "label": "Complete Wiki.js setup wizard",

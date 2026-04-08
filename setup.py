@@ -870,59 +870,98 @@ def step_update_domains(output_dir: Path):
         return
 
     nginx_conf_dir = output_dir / "nginx" / "conf.d"
-    if not nginx_conf_dir.exists():
-        console.print("[yellow]⚠  No nginx/conf.d directory found.[/yellow]")
-        return
 
-    # Cargar todos los servicios para obtener nginx_domain_var
+    # Cargar todos los servicios
     builtin  = [load_builtin(s) for s in BUILTIN_SERVICES]
     custom   = load_custom_templates(TMPL_DIR)
     all_svcs = builtin + custom
 
-    updated = []
+    updated_nginx    = []
+    updated_composes = []
+
     for svc in all_svcs:
         domain_var = svc.get("nginx_domain_var")
         if not domain_var:
             continue
-        conf_path = nginx_conf_dir / f"{svc['id']}.conf"
-        if not conf_path.exists():
-            continue
-        subdomain = env_vars.get(domain_var, svc["id"])
+
+        subdomain       = env_vars.get(domain_var, svc["id"])
         new_server_name = f"{subdomain}.{new_domain}"
 
-        content = conf_path.read_text()
-        # Reemplaza cualquier server_name existente
-        import re
-        content = re.sub(
-            r"server_name\s+[^;]+;",
-            f"server_name {new_server_name};",
-            content,
-        )
-        conf_path.write_text(content)
-        updated.append((svc["name"], new_server_name))
-        console.print(f"[green]✔[/green]  {svc['name']} → {new_server_name}")
+        # ── nginx conf ──
+        conf_path = nginx_conf_dir / f"{svc['id']}.conf" if nginx_conf_dir.exists() else None
+        if conf_path and conf_path.exists():
+            content = re.sub(
+                r"server_name\s+[^;]+;",
+                f"server_name {new_server_name};",
+                conf_path.read_text(),
+            )
+            conf_path.write_text(content)
+            updated_nginx.append((svc["name"], new_server_name))
+            console.print(f"[green]✔[/green]  nginx  {svc['name']} → {new_server_name}")
 
-    if not updated:
-        console.print("[yellow]No nginx confs found to update.[/yellow]")
+        # ── compose env vars ──
+        domain_env_vars = svc.get("domain_env_vars")
+        if not domain_env_vars:
+            continue
+
+        compose_path = output_dir / f"docker-compose.{svc['id']}.yml"
+        if not compose_path.exists():
+            compose_path = output_dir / "docker-compose.yml"
+        if not compose_path.exists():
+            continue
+
+        with open(compose_path) as f:
+            data = yaml.safe_load(f)
+
+        # Buscar el servicio principal (primer key en compose del svc)
+        svc_key = next(iter(svc["compose"].keys()), None)
+        if not svc_key or svc_key not in data.get("services", {}):
+            continue
+
+        existing_env = data["services"][svc_key].get("environment", [])
+        keys_to_replace = set(domain_env_vars.keys())
+        existing_env = [e for e in existing_env
+                        if isinstance(e, str) and e.split("=")[0] not in keys_to_replace]
+
+        new_vars = []
+        for key, template in domain_env_vars.items():
+            value = template.format(subdomain=subdomain, base_domain=new_domain)
+            new_vars.append(f"{key}={value}")
+            console.print(f"[green]✔[/green]  compose {svc['name']} {key}={value}")
+
+        data["services"][svc_key]["environment"] = existing_env + new_vars
+
+        with open(compose_path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+        updated_composes.append(svc_key)
+
+    if not updated_nginx and not updated_composes:
+        console.print("[yellow]No confs found to update.[/yellow]")
         return
 
     # Actualizar BASE_DOMAIN en .env
     env_content = env_file.read_text()
     env_content = re.sub(r"BASE_DOMAIN=.*", f"BASE_DOMAIN={new_domain}", env_content)
     env_file.write_text(env_content)
-    console.print(f"[green]✔[/green]  .env BASE_DOMAIN updated to {new_domain}")
+    console.print(f"\n[green]✔[/green]  .env BASE_DOMAIN → {new_domain}")
 
-    # Reiniciar nginx
-    console.print("\n[dim]Restarting nginx...[/dim]")
+    # Reiniciar nginx y servicios con compose actualizado
+    to_restart = ["nginx"] + updated_composes
+    console.print(f"\n[dim]Restarting: {', '.join(to_restart)}...[/dim]")
     result = subprocess.run(
-        ["docker", "compose", "--project-directory", str(output_dir), "restart", "nginx"],
+        ["docker", "compose", "--project-directory", str(output_dir),
+         "up", "-d"] + updated_composes,
         capture_output=True, text=True, cwd=output_dir,
     )
+    subprocess.run(
+        ["docker", "compose", "--project-directory", str(output_dir), "restart", "nginx"],
+        capture_output=True, cwd=output_dir,
+    )
     if result.returncode == 0:
-        console.print("[green]✔[/green]  nginx restarted\n")
+        console.print("[green]✔[/green]  Services restarted\n")
     else:
-        console.print(f"[yellow]⚠  nginx restart failed: {result.stderr.strip()}[/yellow]")
-        console.print("[dim]Run: docker restart server-lab-nginx-1 manually[/dim]\n")
+        console.print(f"[yellow]⚠  Some restarts failed: {result.stderr.strip()}[/yellow]\n")
 
     console.print("[bold]Done.[/bold] Update your reverse proxy (Caddy/Cloudflare) to point to this server.\n")
 

@@ -42,30 +42,66 @@ SERVICE = {
 
 def _runner_post_bootstrap(output_dir, env_vars):
     import questionary as q
-    token = q.text(
-        "Paste the runner registration token from Gitea:",
-        validate=lambda v: True if v.strip() else "Token cannot be empty",
-    ).ask()
-    if not token:
-        return [("warn", "No token provided — runner not started")]
-
-    # Actualizar RUNNER_TOKEN en .env
-    env_file = output_dir / ".env"
-    content  = env_file.read_text()
-    if "RUNNER_TOKEN=" in content:
-        import re
-        content = re.sub(r"RUNNER_TOKEN=.*", f"RUNNER_TOKEN={token.strip()}", content)
-    else:
-        content += f"\nRUNNER_TOKEN={token.strip()}\n"
-    env_file.write_text(content)
-
-    # Levantar el runner
     import subprocess
-    subprocess.run(
-        ["docker", "compose", "--project-directory", str(output_dir), "up", "-d", "gitea-runner"],
-        capture_output=True, cwd=output_dir,
-    )
-    return [
-        ("ok", "RUNNER_TOKEN saved to .env"),
-        ("ok", "gitea-runner started"),
-    ]
+    import yaml
+    import re
+    from pathlib import Path
+
+    # Detectar todos los servicios de tipo gitea runner en los composes
+    runner_services = []
+    for cf in sorted(output_dir.glob("docker-compose*.yml")):
+        data = yaml.safe_load(cf.read_text()) or {}
+        for svc_name, svc_def in (data.get("services") or {}).items():
+            image = svc_def.get("image", "")
+            if "act_runner" in image:
+                runner_services.append(svc_name)
+
+    if not runner_services:
+        return [("warn", "No gitea runner services found in compose files")]
+
+    # Si hay más de uno, preguntar cuál configurar
+    if len(runner_services) == 1:
+        selected = [runner_services[0]]
+    else:
+        selected = q.checkbox(
+            "Multiple runners found — select which to register:",
+            choices=[q.Choice(s, value=s, checked=True) for s in runner_services],
+        ).ask() or []
+        if not selected:
+            return [("warn", "No runners selected")]
+
+    results = []
+    for runner in selected:
+        token = q.text(
+            f"Paste the registration token for [{runner}] (Gitea → Site Admin → Actions → Runners):",
+            validate=lambda v: True if v.strip() else "Token cannot be empty",
+        ).ask()
+        if not token:
+            results.append(("warn", f"{runner}: no token provided — skipped"))
+            continue
+
+        # Guardar token con clave única por runner
+        token_key = f"RUNNER_TOKEN_{runner.upper().replace('-', '_')}"
+        env_file  = Path(output_dir) / ".env"
+        content   = env_file.read_text()
+        if token_key in content:
+            content = re.sub(rf"{token_key}=.*", f"{token_key}={token.strip()}", content)
+        else:
+            content += f"\n{token_key}={token.strip()}\n"
+        # También actualizar RUNNER_TOKEN genérico si es el primero
+        if runner == selected[0]:
+            if "RUNNER_TOKEN=" in content:
+                content = re.sub(r"(?<![_A-Z])RUNNER_TOKEN=.*", f"RUNNER_TOKEN={token.strip()}", content)
+            else:
+                content += f"\nRUNNER_TOKEN={token.strip()}\n"
+        env_file.write_text(content)
+
+        # Levantar el runner
+        subprocess.run(
+            ["docker", "compose", "--project-directory", str(output_dir),
+             "up", "-d", runner],
+            capture_output=True, cwd=output_dir,
+        )
+        results.append(("ok", f"{runner} registered and started"))
+
+    return results
